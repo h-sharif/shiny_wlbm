@@ -1,2 +1,4 @@
 *.csv
 *.xlsx
+spatial_data/
+timeseries_data/
