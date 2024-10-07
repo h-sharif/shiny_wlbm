@@ -18,6 +18,8 @@ library(readxl)
 library(bsicons)
 library(shinyalert)
 library(patchwork)
+library(xts)
+library(dygraphs)
 
 # UI ---------------------------------------------------------------------------
 ui <- page_sidebar(
@@ -62,8 +64,8 @@ ui <- page_sidebar(
       inputId = "outlet_fromlist",
       label = "Point of interest:",
       choices = c(
-        "SFVTO", "SFPM", "Yerba Loca",
-        "Molina", "Mapocho"
+        "SF-VTO", "SF-PM", "Estero Yerba Loca",
+        "Rio Molina", "Rio Mapocho"
       ),
       selected = "Mapocho",
       multiple = FALSE
@@ -104,23 +106,34 @@ ui <- page_sidebar(
       icon = bs_icon("water"),
       br(),
       layout_columns(
+        #### `which_year_q` ----
+        #### `monthly_q` ----
         card(
-          card_header("Monthly"),
+          card_header("Monthly Mean Series"),
           full_screen = TRUE,
-          plotOutput("monthly_q")
+          uiOutput("which_year_q"),
+          plotOutput("monthly_q", height = "auto")
         ),
+        #### `longterm_monthly_q` ----
         card(
-          card_header("Annual"),
+          card_header("Long-term Mean Monthly Totals"),
           full_screen = TRUE,
-          plotOutput("annual_q")
+          plotOutput("longterm_monthly_q")
         ),
-        col_widths = c(7, 5),
+        #### `annual_q` ----
+        card(
+          card_header("Annual Totals"),
+          full_screen = TRUE,
+          plotOutput("annual_q", height = "auto")
+        ),
+        col_widths = c(4, 4, 4),
         height = "calc(50vh - 150px)"
       ),
+      #### `daily_q` ----
       card(
         card_header("Daily"),
         full_screen = TRUE,
-        plotOutput("daily_q"),
+        dygraphOutput("daily_q"),
         max_height = "calc(50vh - 30px)"
       )
     ),
@@ -131,23 +144,34 @@ ui <- page_sidebar(
       icon = icon("vial", class = "fa-light"),
       br(),
       layout_columns(
+        #### `which_year_conc` ----
+        #### `monthly_conc` ----
         card(
-          card_header("Monthly"),
+          card_header("Monthly Mean Series"),
+          uiOutput("which_year_conc"),
           full_screen = TRUE,
           plotOutput("monthly_conc")
         ),
+        #### `longterm_monthly_conc` ----
         card(
-          card_header("Annual"),
+          card_header("Long-term Monthly Mean"),
+          full_screen = TRUE,
+          plotOutput("longterm_monthly_conc")
+        ),
+        #### `annual_conc` ----
+        card(
+          card_header("Annual Mean"),
           full_screen = TRUE,
           plotOutput("annual_conc")
         ),
-        col_widths = c(7, 5),
+        col_widths = c(4, 4, 4),
         height = "calc(50vh - 150px)"
       ),
+      #### `daily_conc` ----
       card(
         card_header("Daily"),
         full_screen = TRUE,
-        plotOutput("daily_conc"),
+        dygraphOutput("daily_conc"),
         max_height = "calc(50vh - 30px)"
       )
         
@@ -159,23 +183,34 @@ ui <- page_sidebar(
       icon = icon("weight-scale", class = "fa-regular"),
       br(),
       layout_columns(
+        #### `which_year_load` ----
+        #### `monthly_load` ----
         card(
-          card_header("Monthly"),
+          card_header("Monthly Total Series"),
+          uiOutput("which_year_load"),
           full_screen = TRUE,
           plotOutput("monthly_load")
         ),
+        #### `longterm_monthly_load` ----
         card(
-          card_header("Annual"),
+          card_header("Long-term Mean Monthly Totals"),
+          full_screen = TRUE,
+          plotOutput("longterm_monthly_load")
+        ),
+        #### `annual_load` ----
+        card(
+          card_header("Annual Totals"),
           full_screen = TRUE,
           plotOutput("annual_load")
         ),
-        col_widths = c(7, 5),
+        col_widths = c(4, 4, 4),
         height = "calc(50vh -  150px)"
       ),
+      #### `daily_load` ----
       card(
         card_header("Daily"),
         full_screen = TRUE,
-        plotOutput("daily_load"),
+        dygraphOutput("daily_load"),
         max_height = "calc(50vh - 30px)"
       )
       
@@ -221,6 +256,7 @@ ui <- page_sidebar(
 
 # Server -----------------------------------------------------------------------
 server <- function(input, output, session) {
+  source("tidy_data_extractor.R")
   shinyalert(
     title = 'Welcome to the Dashboard!',
     text = "This tool presents the results of the coupled GR6J and WLBM model for the Los Bronces mine, covering baseline condition and three remediation scenarios. You can easily compare these scenarios to support informed decision-making by exploring discharge, concentrations, and loads of key constituents (SO4, Cu, and Mn) across different locations and scenarios.",
@@ -317,17 +353,244 @@ server <- function(input, output, session) {
     
   })
   
-  
   # Need to make sure that user pushed the Fetch Data button
-  # Creating reactive data frames that gets updated by the Fetch Data button
-  ## 01-Reactive: Processed Model Results --------------------------------------
-  fetched_data <- reactiveValues(df_q_daily = NULL,
-                                 df_q_summary = NULL,
-                                 df_conc = NULL,
-                                 df_conc_summary = NULL,
-                                 df_load = NULL,
-                                 df_load_summary = NULL)
+  # 01-Reactive ----
+  fetched_data <- reactiveValues(df = NULL)
+  
+  # 01-ObserveEvent: Getting data ----
+  observeEvent(input$get_data, {
+    fetched_data$df <- df_retriver()
+    if (is.null(fetched_data)) {
+      showNotification("Data doesn't exist here, sorry!")
+    }
+  }, priority = 0)
+  
+  # 02-Reactive ----
+  # only related to concentrations and loads
+  processed_data <- reactiveValues(df = NULL)
+  
+  # 01-Observer: Adjusting data based on dashboard input ----
+  observe({
+    req(fetched_data$df, input$scenario, input$constituent)
+    processed_data$df <- fetched_data$df %>%
+      dplyr::filter(Station == input$outlet_fromlist,
+                    Date >= input$date_range[1],
+                    Date <= input$date_range[2]) %>%
+      dplyr::filter(Scenario %in% input$scenario,
+                    Constituent %in% input$constituent)
+  }, priority = 1)
+  
+  # Discharge plots ------------------------------------------------------------
+  output$which_year_q <- renderUI({
+    sliderInput("selected_year_q", "Year:", 
+                min = year(input$date_range[1]),
+                max = year(input$date_range[2]),
+                round = TRUE, step = 1, width = "100%",
+                value = round(mean(year(input$date_range[1]),
+                                   year(input$date_range[2]))))
+  })
+  
+  observe({
+    req(fetched_data$df, input$selected_year_q)
+    df_q_list <- df_calc_discharge(
+      fetched_data$df %>%
+        dplyr::filter(Station == input$outlet_fromlist,
+                      Date >= input$date_range[1],
+                      Date <= input$date_range[2])
+    )
+
+    output$longterm_monthly_q <- renderPlot({
+      df_q_list$longterm_monthly %>%
+        ggplot(aes(x = Month, y = Monthly_Mean_Total)) +
+          geom_col(fill = "blue3", color = "black", linewidth = 0.4) +
+          labs(x = "", y = "Q (mm/month)")
+    }, res = 100)
     
+    output$monthly_q <- renderPlot({
+      df_q_list$monthly %>%
+        dplyr::filter(Year == input$selected_year_q) %>%
+        mutate(Month = ordered(Month, levels = month.abb)) %>%
+        ggplot(aes(x = Month, y = Monthly_Mean)) +
+        geom_col(fill = "blue3", color = "black", linewidth = 0.4) +
+        labs(x = "",
+             y = expression("Q"~"("*m^3*"/s)"))
+      
+    }, res = 100)
+    
+    output$annual_q <- renderPlot({
+      df_q_list$annual %>%
+        ggplot(aes(x = Year, y = Annual_Total)) +
+        geom_point(color = "royalblue", shape = 16, size = 1.5) +
+        geom_line(color = "black", linewidth = 0.3) +
+        labs(x = "",
+             y = "Q (mm/year)",
+             subtitle = paste("Long-term Mean Annual:",
+                              round(df_q_list$annual$Annual_Total, digits = 2),
+                              "(mm/year)"))
+      
+    }, res = 100)
+    
+    output$daily_q <- renderDygraph({
+      xts_obj <- xts(x = df_q_list$daily$Simulated,
+                     order.by = df_q_list$daily$Date)
+      dygraph(xts_obj,
+              ylab = "Discharge (cms)") %>%
+        dySeries("V1", label = "Discharge (cms)",
+                color = "blue") %>%
+        dyRangeSelector()
+    })
+
+  }, priority = 1)
+  
+  
+  
+  # Concentration plots --------------------------------------------------------
+  output$which_year_conc <- renderUI({
+    sliderInput("selected_year_conc", "Year:", 
+                min = year(input$date_range[1]),
+                max = year(input$date_range[2]),
+                round = TRUE, step = 1, width = "100%",
+                value = round(mean(year(input$date_range[1]),
+                                   year(input$date_range[2]))))
+  })
+  
+  observe({
+    req(processed_data$df, input$selected_year_conc)
+    df_conc_list <- df_calc_conc(
+      processed_data$df
+    )
+    
+    output$longterm_monthly_conc <- renderPlot({
+      df_conc_list$longterm_monthly %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario))) %>%
+        ggplot(aes(x = Month, y = Monthly_Mean)) +
+        geom_col(fill = "orange2", color = "black", linewidth = 0.4) +
+        facet_grid(Constituent ~ Scenario, scales = "free_y") +
+        labs(x = "", y = "Concentration (mg/L)")
+    }, res = 100)
+    
+    output$monthly_conc <- renderPlot({
+      df_conc_list$monthly %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario))) %>%
+        dplyr::filter(Year == input$selected_year_conc) %>%
+        mutate(Month = ordered(Month, levels = month.abb)) %>%
+        ggplot(aes(x = Month, y = Monthly_Mean)) +
+        geom_col(fill = "orange2", color = "black", linewidth = 0.4) +
+        facet_grid(Constituent ~ Scenario, scales = "free_y") +
+        labs(x = "",
+             y = "Concentration (mg/L)")
+      
+    }, res = 100)
+    
+    output$annual_conc <- renderPlot({
+      df_conc_list$annual %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario))) %>%
+        ggplot(aes(x = Year, y = Annual_Mean)) +
+        geom_point(color = "orange2", shape = 16, size = 1.5) +
+        geom_line(color = "black", linewidth = 0.3) +
+        facet_grid(Constituent ~ Scenario, scales = "free_y") +
+        labs(x = "",
+             y = "Concentration (mg/L)",
+             subtitle = paste("Long-term Mean Annual:",
+                              round(df_conc_list$annual$Annual_Mean, digits = 2),
+                              "(mg/L)"))
+      
+    }, res = 100)
+    
+    output$daily_conc <- renderDygraph({
+      df_iter <- df_conc_list$daily %>%
+        dplyr::select(c(Date, Constituent, Scenario, Simulated)) %>%
+      pivot_wider(names_from = c(Constituent, Scenario),
+                  values_from = Simulated,
+                  names_sep = "-")
+      
+      xts_obj <- xts(x = df_iter[, c(2:ncol(df_iter))],
+                     order.by = df_iter$Date)
+      dygraph(xts_obj,
+              ylab = "Concentration (mg/L)") %>%
+        dyRangeSelector()
+    })
+    
+  }, priority = 2)
+  
+  
+  # Load plots -----------------------------------------------------------------
+  output$which_year_load <- renderUI({
+    sliderInput("selected_year_load", "Year:", 
+                min = year(input$date_range[1]),
+                max = year(input$date_range[2]),
+                round = TRUE, step = 1, width = "100%",
+                value = round(mean(year(input$date_range[1]),
+                                   year(input$date_range[2]))))
+  })
+  
+  observe({
+    req(processed_data$df, input$selected_year_load)
+    df_load_list <- df_calc_load(
+      processed_data$df
+    )
+    
+    output$longterm_monthly_load <- renderPlot({
+      df_load_list$longterm_monthly %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario)),
+               Monthly_Mean_Total = Monthly_Mean_Total / 1000) %>%
+        ggplot(aes(x = Month, y = Monthly_Mean_Total)) +
+        geom_col(fill = "snow4", color = "black", linewidth = 0.4) +
+        facet_grid(Constituent ~ Scenario, scales = "free_y") +
+        labs(x = "", y = "Load (tonnes/month)")
+    }, res = 100)
+    
+    output$monthly_load <- renderPlot({
+      df_load_list$monthly %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario)),
+               Monthly_Total = Monthly_Total / 1000) %>%
+        dplyr::filter(Year == input$selected_year_load) %>%
+        mutate(Month = ordered(Month, levels = month.abb)) %>%
+        ggplot(aes(x = Month, y = Monthly_Total)) +
+        geom_col(fill = "snow4", color = "black", linewidth = 0.4) +
+        facet_grid(Constituent ~ Scenario, scales = "free_y") +
+        labs(x = "",
+             y = "Load (tonnes/month)")
+      
+    }, res = 100)
+    
+    output$annual_load <- renderPlot({
+      df_load_list$annual %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario)),
+               Annual_Total = Annual_Total / 1000) %>%
+        ggplot(aes(x = Year, y = Annual_Total)) +
+        geom_point(color = "snow4", shape = 16, size = 1.5) +
+        geom_line(color = "black", linewidth = 0.3) +
+        facet_grid(Constituent ~ Scenario, scales = "free_y") +
+        labs(x = "",
+             y = "Load (tonnes/year)",
+             subtitle = paste("Long-term Mean Annual:",
+                              round(df_load_list$annual$Annual_Total, digits = 2),
+                              "(tonnes/year)"))
+      
+    }, res = 100)
+    
+    output$daily_load <- renderDygraph({
+      df_iter <- df_load_list$daily %>%
+        dplyr::select(c(Date, Constituent, Scenario, Simulated)) %>%
+        pivot_wider(names_from = c(Constituent, Scenario),
+                    values_from = Simulated,
+                    names_sep = "-")
+      
+      xts_obj <- xts(x = df_iter[, c(2:ncol(df_iter))],
+                     order.by = df_iter$Date)
+      dygraph(xts_obj,
+              ylab = "Load (kg/day)") %>%
+        dyRangeSelector()
+    })
+    
+  }, priority = 2) 
 }
 
 shinyApp(ui, server)
