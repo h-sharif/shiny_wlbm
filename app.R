@@ -12,6 +12,7 @@ library(bsicons)
 library(shinyalert)
 library(xts)
 library(dygraphs)
+library(gt)
 theme_set(theme_bw())
 
 # UI ---------------------------------------------------------------------------
@@ -152,10 +153,30 @@ ui <- page_sidebar(
           plotOutput("longterm_monthly_conc")
         ),
         #### `annual_conc` ----
-        card(
-          card_header("Annual Mean"),
+        #### `annual_conc_tbl` ----
+        #### `year_split_conc` ----
+        navset_card_tab(
+          nav_panel(title = "Annual Mean Series",
+                    plotOutput("annual_conc")),
+          nav_panel(value = "lterm_annual_conc",
+                    title = "Long-term Mean Annual",
+                    layout_sidebar(
+                      sidebar = sidebar(
+                        span(
+                          div(style = "display:inline-block;",
+                              title = HTML(
+                                "Following year is being used to split years to two periods."
+                              ),
+                              icon("info-circle"),
+                              uiOutput("year_split_conc")
+                          )
+                        ),
+                        width = 150
+                      ),
+                      gt_output("annual_conc_tbl")
+                    )),
           full_screen = TRUE,
-          plotOutput("annual_conc")
+          selected = "lterm_annual_conc"
         ),
         col_widths = c(4, 4, 4),
         height = "calc(50vh - 150px)"
@@ -191,10 +212,30 @@ ui <- page_sidebar(
           plotOutput("longterm_monthly_load")
         ),
         #### `annual_load` ----
-        card(
-          card_header("Annual Totals"),
+        #### `annual_load_tbl` ----
+        #### `year_split_load` ----
+        navset_card_tab(
+          nav_panel(title = "Annual Total Series",
+                    plotOutput("annual_load")),
+          nav_panel(value = "lterm_annual_load",
+                    title = "Long-term Mean Annual Total",
+                    layout_sidebar(
+                      sidebar = sidebar(
+                        span(
+                          div(style = "display:inline-block;",
+                              title = HTML(
+                                "Following year is being used to split years to two periods."
+                              ),
+                              icon("info-circle"),
+                              uiOutput("year_split_load")
+                          )
+                        ),
+                        width = 150
+                      ),
+                      gt_output("annual_load_tbl")
+                    )),
           full_screen = TRUE,
-          plotOutput("annual_load")
+          selected = "lterm_annual_load"
         ),
         col_widths = c(4, 4, 4),
         height = "calc(50vh -  150px)"
@@ -206,7 +247,6 @@ ui <- page_sidebar(
         dygraphOutput("daily_load"),
         max_height = "calc(50vh - 30px)"
       )
-      
     ),
     
     ### Dark/Light mode switch
@@ -352,10 +392,16 @@ server <- function(input, output, session) {
   
   # 01-ObserveEvent: Getting data ----
   observeEvent(input$get_data, {
+    show_modal_spinner(spin = "intersecting-circles",
+                       text = "Processing WLBM results ...")
     fetched_data$df <- df_retriver()
     if (is.null(fetched_data)) {
-      showNotification("Data doesn't exist here, sorry!")
+      showNotification("Data doesn't exist here, sorry!",
+                       type = "error", duration = 10)
     }
+    remove_modal_spinner()
+    showNotification("Retrieved data successfuly!",
+                     type = "message", duration = 4)
   }, priority = 0)
   
   # 02-Reactive ----
@@ -375,7 +421,7 @@ server <- function(input, output, session) {
   
   # Discharge plots ------------------------------------------------------------
   output$which_year_q <- renderUI({
-    sliderInput("selected_year_q", "Year:", 
+    sliderInput("selected_year_q", "Year:", sep = "", 
                 min = year(input$date_range[1]),
                 max = year(input$date_range[2]),
                 round = TRUE, step = 1, width = "100%",
@@ -439,7 +485,7 @@ server <- function(input, output, session) {
   
   # Concentration plots --------------------------------------------------------
   output$which_year_conc <- renderUI({
-    sliderInput("selected_year_conc", "Year:", 
+    sliderInput("selected_year_conc", "Year:", sep = "", 
                 min = year(input$date_range[1]),
                 max = year(input$date_range[2]),
                 round = TRUE, step = 1, width = "100%",
@@ -447,8 +493,20 @@ server <- function(input, output, session) {
                                    year(input$date_range[2]))))
   })
   
+  output$year_split_conc <- renderUI({
+    years_vec <- seq(year(input$date_range[1]), year(input$date_range[2]))
+    selectInput(
+      inputId = "selected_year_split_conc",
+      label = "Divide from:",
+      choices = years_vec,
+      selected = years_vec[round(length(years_vec)/2)],
+      multiple = FALSE
+    )
+  })
+  
   observe({
-    req(processed_data$df, input$selected_year_conc)
+    req(processed_data$df, input$selected_year_conc, 
+        input$selected_year_split_conc)
     df_conc_list <- df_calc_conc(
       processed_data$df
     )
@@ -486,12 +544,35 @@ server <- function(input, output, session) {
         geom_line(color = "black", linewidth = 0.3) +
         facet_grid(Constituent ~ Scenario, scales = "free_y") +
         labs(x = "",
-             y = "Concentration (mg/L)",
-             subtitle = paste("Long-term Mean Annual:",
-                              round(df_conc_list$annual$Annual_Mean, digits = 2),
-                              "(mg/L)"))
-      
+             y = "Concentration (mg/L)")
     }, res = 100)
+    
+    output$annual_conc_tbl <- render_gt({
+      df_iter <- df_conc_list$annual %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario))) %>%
+        mutate(Period = ifelse(Year < as.numeric(input$selected_year_split_conc),
+                               paste(year(input$date_range[1]),
+                                     as.numeric(input$selected_year_split_conc) - 1, 
+                                     sep = "-"),
+                               paste(input$selected_year_split_conc,
+                                     year(input$date_range[2]), 
+                                     sep = "-"))) %>%
+        group_by(Scenario, Constituent, Period) %>%
+        summarise(
+          Longterm_Mean = round(mean(Annual_Mean), 2),
+          .groups = "drop"
+        ) %>%
+        mutate(Constituent = paste(Constituent, "(mg/L)")) %>%
+        pivot_wider(names_from = c(Constituent, Period),
+                    values_from = Longterm_Mean, names_sep = " ")
+      df_iter %>%
+        gt(rowname_col = "Scenario") %>%
+        tab_stubhead(label = md("**Scenario**")) %>%
+        tab_spanner(label = "Solphate", columns = starts_with("SO4")) %>%
+        tab_spanner(label = "Copper", columns = starts_with("Cu")) %>%
+        tab_spanner(label = "Manganese", columns = starts_with("Mn"))
+    })
     
     output$daily_conc <- renderDygraph({
       df_iter <- df_conc_list$daily %>%
@@ -512,7 +593,7 @@ server <- function(input, output, session) {
   
   # Load plots -----------------------------------------------------------------
   output$which_year_load <- renderUI({
-    sliderInput("selected_year_load", "Year:", 
+    sliderInput("selected_year_load", "Year:", sep = "", 
                 min = year(input$date_range[1]),
                 max = year(input$date_range[2]),
                 round = TRUE, step = 1, width = "100%",
@@ -520,8 +601,20 @@ server <- function(input, output, session) {
                                    year(input$date_range[2]))))
   })
   
+  output$year_split_load <- renderUI({
+    years_vec <- seq(year(input$date_range[1]), year(input$date_range[2]))
+    selectInput(
+      inputId = "selected_year_split_load",
+      label = "Divide from:",
+      choices = years_vec,
+      selected = years_vec[round(length(years_vec)/2)],
+      multiple = FALSE
+    )
+  })
+  
   observe({
-    req(processed_data$df, input$selected_year_load)
+    req(processed_data$df, input$selected_year_load,
+        input$selected_year_split_load)
     df_load_list <- df_calc_load(
       processed_data$df
     )
@@ -558,16 +651,43 @@ server <- function(input, output, session) {
                                  paste("Scenario", Scenario)),
                Annual_Total = Annual_Total / 1000) %>%
         ggplot(aes(x = Year, y = Annual_Total)) +
-        geom_point(color = "snow4", shape = 16, size = 1.5) +
+        geom_point(color = "red2", shape = 16, size = 1.5) +
         geom_line(color = "black", linewidth = 0.3) +
         facet_grid(Constituent ~ Scenario, scales = "free_y") +
         labs(x = "",
-             y = "Load (tonnes/year)",
-             subtitle = paste("Long-term Mean Annual:",
-                              round(df_load_list$annual$Annual_Total, digits = 2),
-                              "(tonnes/year)"))
-      
+             y = "Load (tonnes/year)")
     }, res = 100)
+    
+    output$annual_load_tbl <- render_gt({
+      df_iter <- df_load_list$annual %>%
+        mutate(Scenario = ifelse(Scenario == "Base", "Base Case",
+                                 paste("Scenario", Scenario)),
+               Annual_Total = Annual_Total / 1000) %>%
+        mutate(Period = ifelse(Year < as.numeric(input$selected_year_split_load),
+                               paste(year(input$date_range[1]),
+                                     as.numeric(input$selected_year_split_load) - 1, 
+                                     sep = "-"),
+                               paste(input$selected_year_split_load,
+                                     year(input$date_range[2]), 
+                                     sep = "-"))) %>%
+        group_by(Scenario, Constituent, Period) %>%
+        summarise(
+          Longterm_Mean = round(mean(Annual_Total), 2),
+          .groups = "drop"
+        ) %>%
+        mutate(Constituent = paste(Constituent)) %>%
+        pivot_wider(names_from = c(Constituent, Period),
+                    values_from = Longterm_Mean, names_sep = " ")
+      df_iter %>%
+        gt(rowname_col = "Scenario") %>%
+        tab_stubhead(label = md("**Scenario**")) %>%
+        tab_spanner(label = "Solphate (tonnes/year)",
+                    columns = starts_with("SO4")) %>%
+        tab_spanner(label = "Copper (tonnes/year)",
+                    columns = starts_with("Cu")) %>%
+        tab_spanner(label = "Manganese (tonnes/year)",
+                    columns = starts_with("Mn"))
+    })
     
     output$daily_load <- renderDygraph({
       df_iter <- df_load_list$daily %>%
